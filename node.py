@@ -23,6 +23,8 @@ class Node:
         self.state = "follower"
         self.kv_store = {}
         self.last_heartbeat = time.time()
+        self.next_index = {}
+        self.match_index = {}
 
 #AppendEntriesRequest ( RPC structure )
 #for my info RPC stands for Remote Procedure Call, which is a protocol that allows a program to request a service from a program located on another computer in a network. In the context of Raft, AppendEntries is an RPC used by the leader to replicate log entries and to provide a heartbeat signal to followers.
@@ -76,31 +78,77 @@ def start_election():
             print(f"{node.node_id}: Failed to contact {peer}")
     if node.state == "candidate" and votes_received >= votes_neded:
         node.state = "leader"
+        node.next_index = {peer: len(node.log) for peer in PEERS}
+        node.match_index = {peer: -1 for peer in PEERS}
         print(f"{node.node_id}: Became leader for term {node.current_term}")
     else:
         node.state = "follower"
         print(f"{node.node_id}: Election failed, reverting to follower")
 
+#applies every log entry between last_applied and commit_index to the kv_store
+def apply_committed_entries():
+    while node.last_applied < node.commit_index:
+        node.last_applied += 1
+        entry = node.log[node.last_applied]
+        node.kv_store[entry["key"]] = entry["value"]
+
+#leader-only: checks if any higher index has been replicated to a majority, and if so commits it
+def advance_commit_index():
+    total_nodes = len(PEERS) + 1
+    majority = (total_nodes // 2) + 1
+
+    for N in range(len(node.log) - 1, node.commit_index, -1):
+        if node.log[N]["term"] != node.current_term:
+            continue  # safety rule: never directly commit an entry from an older term
+
+        replicated_count = 1  # the leader itself has this entry
+        for peer in PEERS:
+            if node.match_index.get(peer, -1) >= N:
+                replicated_count += 1
+
+        if replicated_count >= majority:
+            node.commit_index = N
+            break
+
+    apply_committed_entries()
+
 #after a node becomes the leader the leader needs to send hearbeats
 #the logic for that is in this function
 def send_heartbeats():
     for peer in PEERS:
+        next_idx = node.next_index.get(peer, len(node.log))
+        prev_log_index = next_idx - 1
+        prev_log_term = node.log[prev_log_index]["term"] if prev_log_index >= 0 else 0
+        entries = node.log[next_idx:]
+
         try:
             response = requests.post(f"{peer}/append_entries", json={
                 "term": node.current_term,
                 "leader_id": node.node_id,
-                "prev_log_index": 0,
-                "prev_log_term": 0,
-                "entries": [],
-                "leader_commit": 0
+                "prev_log_index": prev_log_index,
+                "prev_log_term": prev_log_term,
+                "entries": entries,
+                "leader_commit": node.commit_index
             }, timeout=1)
             data = response.json()
+
             if data.get("term", node.current_term) > node.current_term:
                 node.current_term = data["term"]
                 node.state = "follower"
                 node.voted_for = None
+                break  # no longer leader, stop this heartbeat round
+
+            if data.get("success"):
+                node.match_index[peer] = prev_log_index + len(entries)
+                node.next_index[peer] = node.match_index[peer] + 1
+            else:
+                # log mismatch — back up and retry this peer from an earlier index next round
+                node.next_index[peer] = max(0, next_idx - 1)
         except requests.exceptions.RequestException:
             pass # Ignore failures for now
+
+    if node.state == "leader":
+        advance_commit_index()
 
 async def heartbeat_loop():
     while True:
@@ -158,6 +206,26 @@ async def append_entries(req: AppendEntriesRequest):
     node.state = "follower"
     node.voted_for = req.leader_id
     node.last_heartbeat = time.time()
+
+    # log matching check: do we have an entry at prev_log_index with prev_log_term?
+    if req.prev_log_index >= 0:
+        if len(node.log) <= req.prev_log_index or node.log[req.prev_log_index]["term"] != req.prev_log_term:
+            return {"term": node.current_term, "success": False}
+
+    # append new entries, overwriting anything conflicting from this point on
+    insert_at = req.prev_log_index + 1
+    for i, entry in enumerate(req.entries):
+        idx = insert_at + i
+        if idx < len(node.log):
+            if node.log[idx]["term"] != entry["term"]:
+                node.log = node.log[:idx]
+                node.log.append(entry)
+        else:
+            node.log.append(entry)
+
+    if req.leader_commit > node.commit_index:
+        node.commit_index = min(req.leader_commit, len(node.log) - 1)
+        apply_committed_entries()
 
     return {"term": node.current_term, "success": True}
 
