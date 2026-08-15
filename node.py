@@ -28,6 +28,7 @@ class Node:
 
 #AppendEntriesRequest ( RPC structure )
 #for my info RPC stands for Remote Procedure Call, which is a protocol that allows a program to request a service from a program located on another computer in a network. In the context of Raft, AppendEntries is an RPC used by the leader to replicate log entries and to provide a heartbeat signal to followers.
+
 class AppendEntriesRequest(BaseModel):
     term: int
     leader_id: str
