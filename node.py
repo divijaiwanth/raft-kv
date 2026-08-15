@@ -66,8 +66,8 @@ def start_election():
             response = requests.post(f"{peer}/request_vote", json= {
                 "term": node.current_term,
                 "candidate_id": node.node_id,
-                "last_log_index": 0,
-                "last_log_term": 0
+                "last_log_index": len(node.log) - 1,
+                "last_log_term": node.log[-1]["term"] if node.log else 0
             }, timeout=1)
             data = response.json()
             if data.get("vote_granted"):
@@ -189,8 +189,16 @@ async def request_vote(req: RequestVoteRequest):
         node.state = "follower"
         node.voted_for = None
 
-    # Step 3: now check if we can vote (log-freshness check omitted for now — log is empty)
-    if node.voted_for is None or node.voted_for == req.candidate_id:
+    # Step 3: check candidate eligibility — hasn't voted for someone else this term,
+    # AND the candidate's log is at least as up-to-date as ours (term first, index as tiebreaker)
+    my_last_log_index = len(node.log) - 1
+    my_last_log_term = node.log[-1]["term"] if node.log else 0
+
+    log_is_up_to_date = (req.last_log_term > my_last_log_term) or (
+        req.last_log_term == my_last_log_term and req.last_log_index >= my_last_log_index
+    )
+
+    if (node.voted_for is None or node.voted_for == req.candidate_id) and log_is_up_to_date:
         node.voted_for = req.candidate_id
         node.last_heartbeat = time.time()
         return {"term": node.current_term, "vote_granted": True}
