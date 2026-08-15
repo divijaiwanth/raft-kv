@@ -18,8 +18,8 @@ class Node:
         self.current_term = 0
         self.voted_for = None
         self.log = []
-        self.commit_index = 0
-        self.last_applied = 0
+        self.commit_index = -1
+        self.last_applied = -1
         self.state = "follower"
         self.kv_store = {}
         self.last_heartbeat = time.time()
@@ -40,7 +40,7 @@ class AppendEntriesRequest(BaseModel):
 #timerlogic fro checking ( heartbeats )
 async def election_timeout_loop():
     while True:
-        timeout = random.uniform(1.5,3.0) #this adds randomness to the election timeout
+        timeout = random.uniform(3.0,6.0) #this adds randomness to the election timeout
         await asyncio.sleep(timeout)
 
         elapsed = time.time() - node.last_heartbeat
@@ -68,7 +68,7 @@ def start_election():
                 "candidate_id": node.node_id,
                 "last_log_index": len(node.log) - 1,
                 "last_log_term": node.log[-1]["term"] if node.log else 0
-            }, timeout=1)
+            }, timeout=2)
             data = response.json()
             if data.get("vote_granted"):
                 votes_received += 1
@@ -81,6 +81,7 @@ def start_election():
         node.next_index = {peer: len(node.log) for peer in PEERS}
         node.match_index = {peer: -1 for peer in PEERS}
         print(f"{node.node_id}: Became leader for term {node.current_term}")
+        send_heartbeats()  # establish authority immediately, don't wait for the next heartbeat tick
     else:
         node.state = "follower"
         print(f"{node.node_id}: Election failed, reverting to follower")
@@ -129,7 +130,7 @@ def send_heartbeats():
                 "prev_log_term": prev_log_term,
                 "entries": entries,
                 "leader_commit": node.commit_index
-            }, timeout=1)
+            }, timeout=2)
             data = response.json()
 
             if data.get("term", node.current_term) > node.current_term:
@@ -184,7 +185,7 @@ async def request_vote(req: RequestVoteRequest):
 
     # Step 2: if candidate's term is newer, catch up FIRST —
     # regardless of what happens next
-    if req.term > node.current_term:
+    if req.term > node.current_term :
         node.current_term = req.term
         node.state = "follower"
         node.voted_for = None
@@ -258,13 +259,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.id == "node1":
-        PEERS = ["http://localhost:8001","http://localhost:8002","http://localhost:8003"]
+        PEERS = ["http://localhost:8001","http://localhost:8002"]
     elif args.id == "node2":
-        PEERS = ["http://localhost:8000","http://localhost:8002","http://localhost:8003"]
-    elif args.id == "node3":
-        PEERS = ["http://localhost:8000","http://localhost:8001","http://localhost:8003"]
+        PEERS = ["http://localhost:8000","http://localhost:8002"]
     else:
-        PEERS = ["http://localhost:8000","http://localhost:8001","http://localhost:8002"]
+        PEERS = ["http://localhost:8000","http://localhost:8001"]
 
     node = Node(node_id=args.id)
     uvicorn.run(app, host="0.0.0.0", port=args.port)
