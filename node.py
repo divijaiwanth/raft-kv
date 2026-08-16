@@ -243,6 +243,7 @@ class WriteRequest(BaseModel):
     key: str
     value: str
 
+#this function is used to write a key-value pair to the log. It checks if the node is the leader, #and if so, appends the entry to the log. If the node is not the leader, it returns an error #indicating that it is not the leader and provides the ID of the current leader.
 @app.post("/write")
 async def write(req: WriteRequest):
     if node.state != "leader":
@@ -252,6 +253,16 @@ async def write(req: WriteRequest):
     node.log.append(entry)
 
     return {"success": True, "index": len(node.log) - 1}
+
+#Read endpoint 
+@app.get("/read/{key}")
+async def read(key: str):
+    if key not in node.kv_store:
+        return {"error": "key_not_found"}
+    value = node.kv_store[key]
+    index = node.last_applied
+    return { "index": index, "key": key, "value": value}
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
